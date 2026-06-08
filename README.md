@@ -7,6 +7,8 @@ as [claude.ai/settings/usage](https://claude.ai/settings/usage):
 - **First number** → current **session** (the rolling 5-hour window).
 - **Second number** → **weekly**, all models (the rolling 7-day window).
 
+<img width="191" height="257" alt="Screenshot 2026-06-08 at 23 48 53" src="https://github.com/user-attachments/assets/13f5c262-2873-48e7-bb7e-6333e3a3ceab" />
+
 The dropdown shows each percentage, its reset time, *Open usage page*,
 *Refresh now*, the last-checked time, and *Quit*. When a meter first crosses a
 threshold (default 80%) you get a Notification Centre banner.
