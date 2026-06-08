@@ -1,17 +1,15 @@
 # Claude Usage — macOS menu-bar meter
 
-A tiny menu-bar app that shows your Claude subscription usage as **two vertical
-0–100% bars** — the same numbers as [claude.ai/settings/usage](https://claude.ai/settings/usage):
+A tiny menu-bar app that shows your Claude subscription usage as **two
+percentages** in the menu-bar title — `<session>% · <weekly>%`, the same numbers
+as [claude.ai/settings/usage](https://claude.ai/settings/usage):
 
-- **Left bar** → current **session** (the rolling 5-hour window).
-- **Right bar** → **weekly**, all models (the rolling 7-day window).
+- **First number** → current **session** (the rolling 5-hour window).
+- **Second number** → **weekly**, all models (the rolling 7-day window).
 
-Each bar is a rounded outline (the empty 0–100 track) with a solid fill rising
-from the bottom. The icon is a macOS *template* image, so it auto-tints for light
-and dark menu bars. Hover for the exact percentages; the dropdown shows each
-percentage, its reset time, *Open usage page*, *Refresh now*, the last-checked
-time, and *Quit*. When a meter first crosses a threshold (default 80%) you get a
-Notification Centre banner.
+The dropdown shows each percentage, its reset time, *Open usage page*,
+*Refresh now*, the last-checked time, and *Quit*. When a meter first crosses a
+threshold (default 80%) you get a Notification Centre banner.
 
 ## How it works
 
@@ -29,10 +27,10 @@ The app is **read-only**: it uses whatever OAuth token Claude Code has stored
 and **never refreshes it**. That token expires roughly hourly, and only running
 the `claude` CLI refreshes it. So:
 
-- While the token is valid, the bars update every minute as expected.
-- Once it expires, every poll returns "token expired", the bars stop updating,
-  and the menu shows **"⚠ OAuth token expired — run a Claude Code command to
-  refresh"** until you next use Claude Code.
+- While the token is valid, the numbers update every minute as expected.
+- Once it expires, every poll returns "token expired", the title shows **"⚠"**,
+  the numbers stop updating, and the menu shows **"⚠ OAuth token expired — run a
+  Claude Code command to refresh"** until you next use Claude Code.
 
 For an always-on meter this is the main limitation. The fix would be an
 auto-refresh mode (refresh the token via the OAuth refresh endpoint and write it
@@ -77,7 +75,6 @@ Either:
 ```
 main.go                 systray wiring, poll loop, menu, threshold banners
 internal/usage/         read OAuth token + query endpoint, parse stable keys → two meters
-internal/icon/          programmatic two-bar meter icon (template PNG)
 internal/notify/        Notification Centre banner via osascript
 build/                  Info.plist, make-app.sh, LaunchAgent plist
 ```
@@ -85,20 +82,16 @@ build/                  Info.plist, make-app.sh, LaunchAgent plist
 ## Testing
 
 ```sh
-go test ./...                                              # unit tests (offline)
-
-# Diagnostic (build-tagged, opt-in): render the meter at several fill levels.
-ICON_DUMP_DIR=/tmp go test -tags dumpicons -run TestDump ./internal/icon
-open /tmp/bars-montage@8x.png
+go test ./...   # unit tests (offline)
 ```
 
 ## Notes & possible extensions
 
 - **Auto-refresh** (above) is the most useful next step for unattended running.
-- **Severity colour** — the bars are monochrome template images so they adapt to
-  the menu-bar theme; a coloured variant (green→amber→red as a meter fills) is
-  possible but needs a white halo to stay visible on both themes, the way the
-  sibling github-status-tracker draws its incident dot.
+- **Two-line display** — MenuMeters-style stacked numbers aren't possible through
+  `fyne.io/systray` (it force-sizes icon images to 16×16), so the title is a
+  single line. A stacked variant would need a custom `NSStatusItem` view, i.e. a
+  fork of the systray library.
 - **More windows** — the endpoint also returns Sonnet/Opus and rotating internal
-  codename windows; the icon layer could grow more bars, but two keeps the
+  codename windows; the title could grow more numbers, but two keeps the
   menu-bar footprint small.

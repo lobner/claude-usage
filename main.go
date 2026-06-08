@@ -1,9 +1,9 @@
 // Command claudeusage is a macOS menu-bar app that shows your Claude subscription
-// usage as two vertical 0–100% meter bars (left = current 5-hour session, right =
-// the 7-day "all models" weekly limit) — the same numbers as
-// claude.ai/settings/usage. It reads the usage endpoint directly with Claude
-// Code's stored OAuth token once a minute and posts a Notification Centre banner
-// when a meter crosses a threshold.
+// usage as two percentages in the menu-bar title — "<session>% · <weekly>%",
+// where session is the current 5-hour window and weekly is the 7-day "all models"
+// limit — the same numbers as claude.ai/settings/usage. It reads the usage
+// endpoint directly with Claude Code's stored OAuth token once a minute and posts
+// a Notification Centre banner when a meter crosses a threshold.
 //
 // Environment overrides:
 //
@@ -21,7 +21,6 @@ import (
 
 	"fyne.io/systray"
 
-	"claudeusage/internal/icon"
 	"claudeusage/internal/notify"
 	"claudeusage/internal/usage"
 )
@@ -56,7 +55,7 @@ func main() {
 }
 
 func onReady() {
-	systray.SetTemplateIcon(icon.BarsPNG(0, 0), icon.BarsPNG(0, 0))
+	systray.SetTitle("…")
 	systray.SetTooltip("Claude usage — checking…")
 
 	mSession = systray.AddMenuItem("Current session: …", "5-hour session window")
@@ -122,7 +121,8 @@ func check() {
 
 	switch {
 	case err == usage.ErrTokenExpired:
-		// Keep the last known bars; just flag that the token needs refreshing.
+		// Keep the last known numbers; just flag that the token needs refreshing.
+		systray.SetTitle("⚠")
 		mSession.SetTitle("⚠ OAuth token expired")
 		mWeekly.SetTitle("Run a Claude Code command to refresh")
 		mSessionReset.Hide()
@@ -144,8 +144,7 @@ func check() {
 }
 
 func updateUI(u usage.Usage) {
-	png := icon.BarsPNG(float64(u.Session.Percent), float64(u.Weekly.Percent))
-	systray.SetTemplateIcon(png, png)
+	systray.SetTitle(fmt.Sprintf("%d%% · %d%%", u.Session.Percent, u.Weekly.Percent))
 	systray.SetTooltip(fmt.Sprintf("Claude usage — session %d%% · weekly %d%%", u.Session.Percent, u.Weekly.Percent))
 
 	mSession.SetTitle(fmt.Sprintf("Current session: %d%%", u.Session.Percent))
