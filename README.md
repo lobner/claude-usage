@@ -160,3 +160,11 @@ go test ./...   # unit tests (offline)
 - **More windows** — the endpoint also returns Sonnet/Opus and rotating internal
   codename windows; the title could grow more numbers, but two keeps the
   menu-bar footprint small.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+It vendors a fork of [`fyne.io/systray`](https://github.com/fyne-io/systray)
+under `third_party/systray/`, which is licensed under the Apache License 2.0 and
+retains its own [`LICENSE`](third_party/systray/LICENSE).
