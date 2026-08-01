@@ -9,9 +9,26 @@ as [claude.ai/settings/usage](https://claude.ai/settings/usage):
 
 <img width="191" height="257" alt="Screenshot 2026-06-08 at 23 48 53" src="https://github.com/user-attachments/assets/13f5c262-2873-48e7-bb7e-6333e3a3ceab" />
 
-The dropdown shows each percentage, its reset time, *Open usage page*,
-*Refresh now*, the last-checked time, and *Quit*. When a meter first crosses a
-threshold (default 80%) you get a Notification Centre banner.
+The dropdown shows each percentage, its reset time, the Claude service status,
+*Open usage page*, *Refresh now*, the last-checked time, and *Quit*. When a meter
+first crosses a threshold (default 80%) you get a Notification Centre banner.
+
+## Service status
+
+Every poll also reads [status.claude.com](https://status.claude.com). While it
+reports anything other than *All Systems Operational*, a **red dot** appears in
+front of the percentages (`🔴 12% · 34%`) and the dropdown grows an outage
+section:
+
+- a headline row — `●  Partial System Outage` — which opens status.claude.com;
+- one row per ongoing incident (and per in-progress maintenance), labelled
+  `Investigating — <incident>`; hovering shows the newest update, clicking opens
+  that incident on the status page;
+- an *Affected:* row listing the components that are not operational.
+
+When everything is fine the dot disappears and the section collapses to a single
+`✓  All services operational` row. The status page needs no credentials, so the
+dot keeps working even while the OAuth token is expired.
 
 ## How it works
 
@@ -111,6 +128,7 @@ no Dock icon).
 | --------------- | ------- | -------------------------------------------------------------- |
 | `POLL_SECONDS`  | `60`    | Polling interval in seconds (min 10).                          |
 | `ALERT_PERCENT` | `80`    | Banner when a meter first reaches this %. `0` disables alerts. |
+| `STATUS_URL`    | `https://status.claude.com/api/v2/summary.json` | Statuspage summary document to poll for the outage dot. |
 
 ## Launch at login
 
@@ -128,6 +146,8 @@ Either:
 ```
 main.go                 systray wiring, poll loop, menu, threshold banners
 internal/usage/         read OAuth token + query endpoint, parse stable keys → two meters
+internal/status/        poll status.claude.com summary API → indicator, incidents, components
+internal/icon/          the red status dot, drawn programmatically (no binary assets)
 internal/notify/        Notification Centre banner via osascript
 build/                  Info.plist, make-app.sh, LaunchAgent plist
 third_party/systray/    vendored fork of fyne.io/systray (see below)
@@ -146,7 +166,15 @@ re-apply that patch.
 
 ```sh
 go test ./...   # unit tests (offline)
+
+# Opt-in diagnostics against the live endpoints:
+go test -tags livetest -run TestLiveFetch  -v ./internal/usage   # needs a valid OAuth token
+go test -tags livetest -run TestLiveStatus -v ./internal/status  # needs network only
 ```
+
+To see the outage UI without waiting for a real incident, point `STATUS_URL` at a
+saved summary document served locally (e.g. `python3 -m http.server`) with the
+`status.indicator` field set to something other than `none`.
 
 ## Notes & possible extensions
 
