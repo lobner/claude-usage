@@ -7,7 +7,7 @@ as [claude.ai/settings/usage](https://claude.ai/settings/usage):
 - **First number** → current **session** (the rolling 5-hour window).
 - **Second number** → **weekly**, all models (the rolling 7-day window).
 
-<img width="206" alt="The dropdown: both meters with their reset times, service status, and Launch at Login" src="docs/menu.png" />
+<img width="760" alt="The menu bar showing 1% · 31%, and the dropdown: both meters with reset times, service status, Launch at Login and the About row" src="docs/menu.png" />
 
 The dropdown shows each percentage, its reset time, the Claude service status,
 *Open usage page*, *Refresh now*, the last-checked time, *Launch at Login*,
