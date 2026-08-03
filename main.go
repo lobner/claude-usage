@@ -2,22 +2,29 @@
 // usage as two percentages in the menu-bar title — "<session>% · <weekly>%",
 // where session is the current 5-hour window and weekly is the 7-day "all models"
 // limit — the same numbers as claude.ai/settings/usage. It reads the usage
-// endpoint directly with Claude Code's stored OAuth token once a minute and posts
-// a Notification Centre banner when a meter crosses a threshold.
+// endpoint directly with Claude Code's stored OAuth token and posts a
+// Notification Centre banner when a meter crosses a threshold.
 //
 // It also polls status.claude.com: whenever the status page reports anything
 // other than "All Systems Operational", a red dot appears in front of the
 // percentages and the dropdown lists the ongoing incidents.
 //
+// The two sources are polled at different rates. The status page needs no
+// credentials and is not rate limited, so it is read every POLL_SECONDS. The
+// usage endpoint allows roughly one request every two minutes per token, so it
+// gets its own USAGE_SECONDS cadence and backs off when refused.
+//
 // Environment overrides:
 //
-//	POLL_SECONDS   polling interval in seconds (default 60, minimum 10)
+//	POLL_SECONDS   status-page interval in seconds (default 60, minimum 10)
+//	USAGE_SECONDS  usage-endpoint interval in seconds (default 150, minimum 120)
 //	ALERT_PERCENT  notify when a meter first reaches this % (default 80, 0=off)
 //	STATUS_URL     Statuspage summary document to poll (default status.claude.com)
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,10 +44,20 @@ import (
 
 const (
 	defaultPollInterval = 60 * time.Second
-	usagePageURL        = "https://claude.ai/settings/usage"
-	statusPageURL       = "https://status.claude.com"
-	maxStatusItems      = 5  // fixed pool of incident rows (systray can't remove items)
-	statusRowMaxLen     = 64 // characters per incident row
+
+	// The usage endpoint rate-limits at roughly one request per two minutes per
+	// token, and answers a 429 with "Retry-After: 0" — no budget headers, nothing
+	// to pace against. At the 60 s poll interval every other call came back 429,
+	// so the usage endpoint gets its own, slower cadence while the status page
+	// (unauthenticated, unlimited) keeps to pollInterval.
+	defaultUsageInterval = 150 * time.Second
+	minUsageInterval     = 120 * time.Second
+	maxUsageBackoff      = 15 * time.Minute
+
+	usagePageURL    = "https://claude.ai/settings/usage"
+	statusPageURL   = "https://status.claude.com"
+	maxStatusItems  = 5  // fixed pool of incident rows (systray can't remove items)
+	statusRowMaxLen = 64 // characters per incident row
 )
 
 // noIcon is deliberately undecodable image data: systray has no "remove the
@@ -49,9 +66,10 @@ const (
 var noIcon = []byte{0}
 
 var (
-	pollInterval = pollIntervalFromEnv()
-	alertPercent = alertPercentFromEnv()
-	statusURL    = envOr("STATUS_URL", status.DefaultURL)
+	pollInterval  = pollIntervalFromEnv()
+	usageInterval = usageIntervalFromEnv()
+	alertPercent  = alertPercentFromEnv()
+	statusURL     = envOr("STATUS_URL", status.DefaultURL)
 
 	mSession      *systray.MenuItem
 	mSessionReset *systray.MenuItem
@@ -73,6 +91,11 @@ var (
 	alertedWeekly  bool
 	haveStatus     bool
 	dotShown       bool
+
+	// Usage-endpoint pacing, also poll-goroutine-only. nextUsage is when the
+	// endpoint may be called again; backoff grows while it keeps saying no.
+	nextUsage    time.Time
+	usageBackoff time.Duration
 
 	// Shared between the poll goroutine (writer) and click goroutines (readers).
 	mu           sync.Mutex
@@ -170,7 +193,20 @@ func onExit() {}
 // offer: when the user has already answered either way, when the binary is not
 // running from its .app bundle, or on a macOS without SMAppService.
 func offerLaunchAtLogin() {
-	if login.BundlePath() == "" || !login.Supported() || login.Answered() {
+	if login.BundlePath() == "" || !login.Supported() {
+		return
+	}
+
+	// Already answered: don't ask again, but do make the system match what we
+	// recorded — see login.Reconcile for why that can't be read back instead.
+	if login.Answered() {
+		if login.Answer() {
+			if login.Reconcile() {
+				mLogin.Check()
+			} else {
+				mLogin.Uncheck()
+			}
+		}
 		return
 	}
 
@@ -238,6 +274,10 @@ func pollLoop() {
 		case <-t.C:
 			check()
 		case <-refreshNow:
+			// "Refresh now" means now: drop the pacing so the usage endpoint is
+			// actually called. If it refuses, the menu says so.
+			nextUsage = time.Time{}
+			usageBackoff = 0
 			check()
 		}
 	}
@@ -247,15 +287,35 @@ func check() {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	// The status page needs no credentials, so check it first and independently
-	// of the usage endpoint — the dot must still work while the token is expired.
+	// The status page needs no credentials and isn't rate limited, so check it
+	// first and on every poll — the dot must keep working while the usage
+	// endpoint is unavailable for any reason.
 	checkStatus(ctx)
 
+	// Respect the pacing the endpoint forces on us rather than calling it every
+	// poll and collecting 429s.
+	if time.Now().Before(nextUsage) {
+		return
+	}
+
 	u, err := usage.Fetch(ctx)
-	now := time.Now().Format("15:04:05")
+	now := time.Now()
+	stamp := now.Format("15:04:05")
 
 	switch {
-	case err == usage.ErrTokenExpired:
+	case errors.Is(err, usage.ErrRateLimited):
+		// Expected, not a fault: keep the numbers on screen and space out.
+		var rl usage.RateLimited
+		errors.As(err, &rl)
+		wait := backOffUsage(rl.RetryAfter)
+		nextUsage = now.Add(wait)
+		mLastCheck.SetTitle("Rate limited; retrying " + nextUsage.Format("15:04:05"))
+		mLastCheck.SetTooltip(fmt.Sprintf(
+			"The usage endpoint allows about one request every two minutes. Backing off %s.",
+			wait.Round(time.Second)))
+		return
+
+	case errors.Is(err, usage.ErrTokenExpired):
 		// Keep the last known numbers; just flag that the token needs refreshing.
 		systray.SetTitle("⚠")
 		mSession.SetTitle("⚠ OAuth token expired")
@@ -263,19 +323,58 @@ func check() {
 		mSessionReset.Hide()
 		mWeeklyReset.Hide()
 		systray.SetTooltip("Claude usage — token expired; refresh via Claude Code")
-		mLastCheck.SetTitle("Token expired " + now)
+		mLastCheck.SetTitle("Token expired " + stamp)
+		mLastCheck.SetTooltip("")
+		nextUsage = now.Add(usageInterval)
 		return
+
 	case err != nil:
+		// Say what went wrong: a bare "failed" is indistinguishable from the
+		// rate limiting above, which is what made this hard to diagnose.
 		systray.SetTooltip("Claude usage — update failed")
-		mLastCheck.SetTitle("Last check failed " + now)
+		mLastCheck.SetTitle("Last check failed " + stamp + " — " + truncate(reason(err), 48))
+		mLastCheck.SetTooltip(err.Error())
+		nextUsage = now.Add(usageInterval)
 		return
 	}
+
+	usageBackoff = 0
+	nextUsage = now.Add(usageInterval)
 
 	last = u
 	haveData = true
 	updateUI(u)
 	notifyThresholds(u)
-	mLastCheck.SetTitle("Last checked " + now)
+	mLastCheck.SetTitle("Last checked " + stamp)
+	mLastCheck.SetTooltip("")
+}
+
+// backOffUsage doubles the wait each time the endpoint refuses, from one usage
+// interval up to maxUsageBackoff, and takes the server's Retry-After instead when
+// that asks for longer.
+func backOffUsage(retryAfter time.Duration) time.Duration {
+	if usageBackoff <= 0 {
+		usageBackoff = usageInterval
+	} else if usageBackoff < maxUsageBackoff {
+		usageBackoff *= 2
+	}
+	if usageBackoff > maxUsageBackoff {
+		usageBackoff = maxUsageBackoff
+	}
+	if retryAfter > usageBackoff {
+		return retryAfter
+	}
+	return usageBackoff
+}
+
+// reason trims an error down to something that fits in a menu row: the first
+// line, without the multi-line JSON body some failures carry.
+func reason(err error) string {
+	s := err.Error()
+	if i := strings.IndexAny(s, "\n\r"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(s), ":"))
 }
 
 func updateUI(u usage.Usage) {
@@ -468,6 +567,20 @@ func openURL(u string) {
 		return
 	}
 	_ = exec.Command("open", u).Start()
+}
+
+// usageIntervalFromEnv reads USAGE_SECONDS, refusing anything below
+// minUsageInterval: going faster than the endpoint's own limit only produces
+// 429s, so a smaller value would make the meter worse, not fresher.
+func usageIntervalFromEnv() time.Duration {
+	if v := os.Getenv("USAGE_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if d := time.Duration(n) * time.Second; d >= minUsageInterval {
+				return d
+			}
+		}
+	}
+	return defaultUsageInterval
 }
 
 func pollIntervalFromEnv() time.Duration {
