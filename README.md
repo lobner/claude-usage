@@ -27,9 +27,15 @@ section:
   that incident on the status page;
 - an *Affected:* row listing the components that are not operational.
 
-When everything is fine the dot disappears and the section collapses to a single
-`✓  All services operational` row. The status page needs no credentials, so the
-dot keeps working even while the OAuth token is expired.
+The dot **blinks** while the outage is unacknowledged, and goes **solid** once you
+open the menu — so a new disruption catches your eye, then stops nagging. A later,
+different incident starts it blinking again. While blinking, the off phase is a
+transparent image of the same size rather than no image at all, so the
+percentages stay put instead of shifting twice a second.
+
+When everything is fine the dot disappears entirely and the section collapses to a
+single `✓  All services operational` row. The status page needs no credentials, so
+the dot keeps working even while the OAuth token is expired.
 
 ## Polling rates, and the rate limit
 
