@@ -7,11 +7,12 @@ as [claude.ai/settings/usage](https://claude.ai/settings/usage):
 - **First number** → current **session** (the rolling 5-hour window).
 - **Second number** → **weekly**, all models (the rolling 7-day window).
 
-<img width="191" height="257" alt="Screenshot 2026-06-08 at 23 48 53" src="https://github.com/user-attachments/assets/13f5c262-2873-48e7-bb7e-6333e3a3ceab" />
+<img width="206" alt="The dropdown: both meters with their reset times, service status, and Launch at Login" src="docs/menu.png" />
 
 The dropdown shows each percentage, its reset time, the Claude service status,
-*Open usage page*, *Refresh now*, the last-checked time, and *Quit*. When a meter
-first crosses a threshold (default 80%) you get a Notification Centre banner.
+*Open usage page*, *Refresh now*, the last-checked time, *Launch at Login*, and
+*Quit*. When a meter first crosses a threshold (default 80%) you get a
+Notification Centre banner.
 
 ## Service status
 
@@ -30,9 +31,34 @@ When everything is fine the dot disappears and the section collapses to a single
 `✓  All services operational` row. The status page needs no credentials, so the
 dot keeps working even while the OAuth token is expired.
 
+## Polling rates, and the rate limit
+
+The usage endpoint rate-limits at roughly **one request per two minutes per
+token**. At the original 60 s poll interval every *other* call came back
+`429 rate_limit_error`, which the menu reported as a bare "Last check failed" —
+so the app looked broken while nothing was actually wrong.
+
+The two sources are therefore paced separately:
+
+- **status.claude.com** — no credentials, no limit — every `POLL_SECONDS` (60 s),
+  so the outage dot stays responsive.
+- **the usage endpoint** — every `USAGE_SECONDS` (150 s, floor 120 s; a smaller
+  value would only produce 429s, so it is refused).
+
+When a 429 does arrive it is treated as expected rather than as a failure: the
+percentages stay on screen, the menu says *"Rate limited; retrying 12:34:56"*, and
+the wait doubles up to 15 minutes until a call succeeds. The server's `Retry-After`
+is honoured when it asks for longer — it is usually `0`, and there are no
+rate-limit budget headers, so the client has to impose its own spacing. Genuine
+failures now name their reason instead of just "failed".
+
+*Refresh now* ignores the pacing and calls the endpoint immediately, on the basis
+that asking explicitly should do something; if that lands inside the limit you get
+the rate-limited row rather than silence.
+
 ## How it works
 
-Every 60 s it queries `https://api.anthropic.com/api/oauth/usage` directly —
+Every `USAGE_SECONDS` it queries `https://api.anthropic.com/api/oauth/usage` —
 the same internal endpoint the claude.ai usage page calls — using Claude Code's
 stored OAuth token (read from the macOS Keychain, falling back to
 `~/.claude/.credentials.json`). It reads the two windows by their **stable**
@@ -46,7 +72,7 @@ The app is **read-only**: it uses whatever OAuth token Claude Code has stored
 and **never refreshes or writes it**. That token expires roughly hourly, and only
 running the `claude` CLI refreshes it. So:
 
-- While the token is valid, the numbers update every minute as expected.
+- While the token is valid, the numbers refresh every `USAGE_SECONDS` as expected.
 - Once it expires, every poll returns "token expired", the title shows **"⚠"**,
   the numbers stop updating, and the menu shows **"⚠ OAuth token expired — run a
   Claude Code command to refresh"** until you next use Claude Code.
@@ -114,19 +140,26 @@ Requires Go 1.22+ (this repo pins `golang 1.25.11` via `.tool-versions`).
 # Run in the foreground (Ctrl-C to stop):
 go run .
 
-# Or build a no-dock .app you can double-click / add to Login Items:
+# Build the .app, and let it offer to install:
 ./build/make-app.sh
-open "Claude Usage.app"
 ```
 
 `make-app.sh` produces `Claude Usage.app` with `LSUIElement=true` (menu-bar-only,
-no Dock icon).
+no Dock icon). After building it asks *"Install to /Applications and relaunch?"*,
+which quits whichever copy is running (the installed one or one launched from this
+repo — they share a bundle id), replaces the bundle, and reopens it from
+`/Applications`. Pass `--install` or `--no-install` to answer up front; with no
+terminal on stdin it builds and stops rather than touching `/Applications`.
+
+Installing this way is worth preferring, because *Launch at Login* records the
+bundle by the path it was registered from — see below.
 
 ## Configuration
 
 | Env var         | Default | Meaning                                                        |
 | --------------- | ------- | -------------------------------------------------------------- |
-| `POLL_SECONDS`  | `60`    | Polling interval in seconds (min 10).                          |
+| `POLL_SECONDS`  | `60`    | Status-page interval in seconds (min 10).                      |
+| `USAGE_SECONDS` | `150`   | Usage-endpoint interval in seconds (min 120 — see below).      |
 | `ALERT_PERCENT` | `80`    | Banner when a meter first reaches this %. `0` disables alerts. |
 | `STATUS_URL`    | `https://status.claude.com/api/v2/summary.json` | Statuspage summary document to poll for the outage dot. |
 
@@ -148,7 +181,22 @@ The offer is made once, either way. The answer is remembered in
 file to be asked again. It is also skipped when the binary isn't running from a
 bundle (`go run .`), since login items are bundles.
 
-Two notes on why it uses `SMAppService` rather than a LaunchAgent:
+Each launch also *reconciles*: if the record says registered, the app registers
+again. That is a no-op when it already is, and it repairs the case where the login
+item was dropped — which happens whenever the bundle is replaced, as
+`make-app.sh --install` does. If macOS instead reports the item as switched off,
+that is left alone: it means someone turned it off in System Settings, and the
+checkbox will show unticked until you tick it again.
+
+Three notes on the mechanics:
+
+- **The bundle is ad-hoc signed with its own identifier.** The Go linker already
+  ad-hoc signs, but it calls every binary it produces `a.out`, and macOS keys
+  login items by signing identity — so two unsigned Go apps look like one item and
+  registering either one evicts the other's *Open at Login* entry. `make-app.sh`
+  runs `codesign --sign - --identifier <bundle id>` to give each build a distinct,
+  stable identity. That buys identity, not trust: these builds are still not
+  Developer ID signed and not notarised.
 
 - A launchd job in `~/Library/LaunchAgents` also starts the app at login, but
   macOS classifies it as a *background item*, so it lands under **App Background
