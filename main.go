@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,10 +57,22 @@ const (
 	minUsageInterval     = 120 * time.Second
 	maxUsageBackoff      = 15 * time.Minute
 
-	usagePageURL    = "https://claude.ai/settings/usage"
-	statusPageURL   = "https://status.claude.com"
+	usagePageURL  = "https://claude.ai/settings/usage"
+	statusPageURL = "https://status.claude.com"
+
+	appName         = "Claude Usage"
+	repoURL         = "https://github.com/lobner/claude-usage"
 	maxStatusItems  = 5  // fixed pool of incident rows (systray can't remove items)
 	statusRowMaxLen = 64 // characters per incident row
+)
+
+// Build stamps, set by build/make-app.sh with -ldflags. A plain `go build` or
+// `go run .` leaves them at these defaults, which is what "dev" in the About row
+// means.
+var (
+	version   = "dev"
+	commit    = ""
+	buildDate = ""
 )
 
 // noIcon is deliberately undecodable image data: systray has no "remove the
@@ -162,6 +175,7 @@ func onReady() {
 	}
 	systray.AddSeparator()
 
+	mAbout := systray.AddMenuItem(aboutTitle(), aboutTooltip())
 	mQuit := systray.AddMenuItem("Quit", "Quit Claude Usage")
 
 	go func() {
@@ -185,6 +199,11 @@ func onReady() {
 		}
 	}()
 	go func() {
+		for range mAbout.ClickedCh {
+			openURL(releaseNotesURL())
+		}
+	}()
+	go func() {
 		<-mQuit.ClickedCh
 		systray.Quit()
 	}()
@@ -205,6 +224,36 @@ func onReady() {
 }
 
 func onExit() {}
+
+// aboutTitle names the app and the build in one line, so the version is readable
+// without clicking anything.
+func aboutTitle() string { return "About " + appName + " " + version }
+
+// aboutTooltip carries what is needed to identify a build in a bug report. The
+// architecture is included because the released archives are Apple silicon only,
+// and the commit because these builds are unsigned — "which build is that?" is
+// otherwise unanswerable.
+func aboutTooltip() string {
+	parts := make([]string, 0, 4)
+	if commit != "" {
+		parts = append(parts, "commit "+commit)
+	}
+	if buildDate != "" {
+		parts = append(parts, "built "+buildDate)
+	}
+	parts = append(parts, runtime.GOOS+"/"+runtime.GOARCH)
+	return strings.Join(parts, " · ") + " — click for the release notes"
+}
+
+// releaseNotesURL points at this exact version's notes when the build came from a
+// clean tag, and at the release list otherwise, since there is nothing to link a
+// dev build to.
+func releaseNotesURL() string {
+	if strings.HasPrefix(version, "v") && !strings.ContainsAny(version, "-+") {
+		return repoURL + "/releases/tag/" + version
+	}
+	return repoURL + "/releases"
+}
 
 // offerLaunchAtLogin asks — once — whether the app should open at login, and
 // registers it as a login item if so. It stays quiet when there is nothing to
