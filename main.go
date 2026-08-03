@@ -29,6 +29,7 @@ import (
 	"fyne.io/systray"
 
 	"claudeusage/internal/icon"
+	"claudeusage/internal/login"
 	"claudeusage/internal/notify"
 	"claudeusage/internal/status"
 	"claudeusage/internal/usage"
@@ -60,6 +61,7 @@ var (
 	mStatusItems  []*systray.MenuItem
 	mAffected     *systray.MenuItem
 	mLastCheck    *systray.MenuItem
+	mLogin        *systray.MenuItem
 
 	refreshNow = make(chan struct{}, 1)
 
@@ -122,6 +124,14 @@ func onReady() {
 	mLastCheck = systray.AddMenuItem("", "")
 	mLastCheck.Disable()
 	systray.AddSeparator()
+
+	mLogin = systray.AddMenuItemCheckbox("Launch at Login",
+		"Open Claude Usage automatically when you log in", login.Enabled())
+	if login.BundlePath() == "" || !login.Supported() {
+		mLogin.Hide() // nothing to register: not a bundle, or macOS 12 or earlier
+	}
+	systray.AddSeparator()
+
 	mQuit := systray.AddMenuItem("Quit", "Quit Claude Usage")
 
 	go func() {
@@ -140,14 +150,84 @@ func onReady() {
 		}
 	}()
 	go func() {
+		for range mLogin.ClickedCh {
+			toggleLaunchAtLogin()
+		}
+	}()
+	go func() {
 		<-mQuit.ClickedCh
 		systray.Quit()
 	}()
 
 	go pollLoop()
+	go offerLaunchAtLogin()
 }
 
 func onExit() {}
+
+// offerLaunchAtLogin asks — once — whether the app should open at login, and
+// registers it as a login item if so. It stays quiet when there is nothing to
+// offer: when the user has already answered either way, when the binary is not
+// running from its .app bundle, or on a macOS without SMAppService.
+func offerLaunchAtLogin() {
+	if login.BundlePath() == "" || !login.Supported() || login.Answered() {
+		return
+	}
+
+	yes, err := notify.Confirm(
+		"Launch Claude Usage at login?",
+		"Claude Usage can start automatically when you log in, so your session and weekly meters are always in the menu bar.",
+		"Launch at Login", "Not Now")
+	if err != nil {
+		return // the dialog itself failed; try again next launch rather than guess
+	}
+	if !yes {
+		_ = login.RecordAnswer(false)
+		return
+	}
+
+	if err := login.Enable(); err != nil {
+		// Don't record the answer, so the offer is made again next launch.
+		_ = notify.Banner("Claude Usage", "Could not open at login: "+err.Error())
+		return
+	}
+	_ = login.RecordAnswer(true)
+	mLogin.Check()
+	warnIfNeedsApproval()
+}
+
+// toggleLaunchAtLogin flips the Launch at Login checkbox. The checkbox is only
+// ticked once the change has actually gone through, so a failure leaves the menu
+// showing what is really the case.
+func toggleLaunchAtLogin() {
+	if mLogin.Checked() {
+		if err := login.Disable(); err != nil {
+			_ = notify.Banner("Claude Usage", "Could not stop opening at login: "+err.Error())
+			return
+		}
+		_ = login.RecordAnswer(false)
+		mLogin.Uncheck()
+		return
+	}
+
+	if err := login.Enable(); err != nil {
+		_ = notify.Banner("Claude Usage", "Could not open at login: "+err.Error())
+		return
+	}
+	_ = login.RecordAnswer(true)
+	mLogin.Check()
+	warnIfNeedsApproval()
+}
+
+// warnIfNeedsApproval covers the case where the user has previously switched the
+// login item off in System Settings: registering succeeds, but macOS keeps it
+// held back until they switch it on there.
+func warnIfNeedsApproval() {
+	if login.NeedsApproval() {
+		_ = notify.Banner("Claude Usage",
+			"Switch Claude Usage on under System Settings → General → Login Items to finish enabling it.")
+	}
+}
 
 func pollLoop() {
 	check() // immediate first check

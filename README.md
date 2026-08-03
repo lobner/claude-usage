@@ -132,7 +132,35 @@ no Dock icon).
 
 ## Launch at login
 
-Either:
+The app offers this itself: the first time you run it from the `.app` bundle it
+asks *"Launch Claude Usage at login?"*, and choosing **Launch at Login**
+registers the bundle as a login item via `SMAppService` (macOS 13+). It then
+appears under System Settings → General → Login Items → **Open at Login**, and
+you can switch it off there.
+
+Register the copy that is going to stay put — macOS remembers the bundle by the
+path it was registered from, so install to `/Applications` *first* and answer the
+prompt from that copy. Answering it from the repo build means the next
+`make-app.sh` (which does `rm -rf` on the bundle) leaves a dangling login item.
+
+The offer is made once, either way. The answer is remembered in
+`~/Library/Application Support/dk.biq.claudeusage/launch-at-login`; delete that
+file to be asked again. It is also skipped when the binary isn't running from a
+bundle (`go run .`), since login items are bundles.
+
+Two notes on why it uses `SMAppService` rather than a LaunchAgent:
+
+- A launchd job in `~/Library/LaunchAgents` also starts the app at login, but
+  macOS classifies it as a *background item*, so it lands under **App Background
+  Activity** instead — labelled "Item from unidentified developer", since these
+  builds are unsigned. `build/dk.biq.claudeusage.plist` is kept as that manual
+  alternative.
+- `SMAppService.mainApp.status` cannot be used to decide whether to ask: it
+  reports `enabled` for a bundle that has *never* been registered, and only says
+  `notRegistered` once something has explicitly unregistered it. Hence the local
+  state file above.
+
+To set it up by hand instead:
 
 - **Login Items** — System Settings → General → Login Items → add
   `Claude Usage.app`; or
@@ -148,7 +176,8 @@ main.go                 systray wiring, poll loop, menu, threshold banners
 internal/usage/         read OAuth token + query endpoint, parse stable keys → two meters
 internal/status/        poll status.claude.com summary API → indicator, incidents, components
 internal/icon/          the red status dot, drawn programmatically (no binary assets)
-internal/notify/        Notification Centre banner via osascript
+internal/login/         open-at-login registration via SMAppService (cgo)
+internal/notify/        Notification Centre banner + confirm dialog via osascript
 build/                  Info.plist, make-app.sh, LaunchAgent plist
 third_party/systray/    vendored fork of fyne.io/systray (see below)
 ```
