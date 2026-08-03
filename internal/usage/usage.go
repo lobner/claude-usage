@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -39,6 +40,29 @@ const (
 // Callers should keep the last known meters and prompt the user to refresh
 // (run any Claude Code command), rather than treat it as a hard error.
 var ErrTokenExpired = errors.New("oauth token expired")
+
+// ErrRateLimited means the endpoint refused the request because it was called
+// too recently. Measured behaviour is roughly one request per two minutes per
+// token, so this is part of normal operation rather than a fault: keep the last
+// known meters and come back later.
+var ErrRateLimited = errors.New("rate limited")
+
+// RateLimited carries how long the server asked us to wait. The endpoint usually
+// sends "Retry-After: 0", which is no help at all, so callers must be ready to
+// apply their own spacing.
+type RateLimited struct {
+	RetryAfter time.Duration // zero when the server didn't say anything useful
+}
+
+func (e RateLimited) Error() string {
+	if e.RetryAfter > 0 {
+		return fmt.Sprintf("rate limited, retry after %s", e.RetryAfter)
+	}
+	return ErrRateLimited.Error()
+}
+
+// Unwrap makes errors.Is(err, ErrRateLimited) work on a RateLimited value.
+func (e RateLimited) Unwrap() error { return ErrRateLimited }
 
 // Meter is a single usage window.
 type Meter struct {
@@ -88,10 +112,34 @@ func fetch(ctx context.Context, token string) (Usage, error) {
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
 		return Usage{}, ErrTokenExpired
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return Usage{}, RateLimited{RetryAfter: retryAfter(resp.Header.Get("Retry-After"))}
 	case resp.StatusCode != http.StatusOK:
 		return Usage{}, fmt.Errorf("usage endpoint HTTP %d: %s", resp.StatusCode, snippet(body))
 	}
 	return parse(body)
+}
+
+// retryAfter reads the header in either of its forms — delay in seconds, or an
+// HTTP date — and returns zero for anything else, including the "0" this endpoint
+// usually sends.
+func retryAfter(h string) time.Duration {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(h); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(h); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 type window struct {
@@ -117,6 +165,11 @@ func parse(body []byte) (Usage, error) {
 	if r.Type == "error" {
 		if r.Error != nil && r.Error.Type == "authentication_error" {
 			return Usage{}, ErrTokenExpired
+		}
+		// Belt and braces: the 429 is caught by status code above, but the same
+		// envelope would otherwise read as an unexplained failure.
+		if r.Error != nil && r.Error.Type == "rate_limit_error" {
+			return Usage{}, RateLimited{}
 		}
 		if r.Error != nil && r.Error.Message != "" {
 			return Usage{}, errors.New(r.Error.Message)
