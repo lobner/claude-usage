@@ -50,6 +50,8 @@ const (
 	// to pace against. At the 60 s poll interval every other call came back 429,
 	// so the usage endpoint gets its own, slower cadence while the status page
 	// (unauthenticated, unlimited) keeps to pollInterval.
+	blinkInterval = 700 * time.Millisecond
+
 	defaultUsageInterval = 150 * time.Second
 	minUsageInterval     = 120 * time.Second
 	maxUsageBackoff      = 15 * time.Minute
@@ -83,6 +85,11 @@ var (
 
 	refreshNow = make(chan struct{}, 1)
 
+	// Icon state, owned by iconLoop. checkStatus reports what the status page
+	// says; opening the menu acknowledges an outage.
+	iconUpdates = make(chan iconUpdate, 1)
+	iconAck     = make(chan struct{}, 1)
+
 	// Poll-goroutine-only state.
 	last           usage.Usage
 	haveData       bool
@@ -90,7 +97,7 @@ var (
 	alertedSession bool
 	alertedWeekly  bool
 	haveStatus     bool
-	dotShown       bool
+	lastIncidents  = map[string]bool{}
 
 	// Usage-endpoint pacing, also poll-goroutine-only. nextUsage is when the
 	// endpoint may be called again; backoff grows while it keeps saying no.
@@ -182,6 +189,17 @@ func onReady() {
 		systray.Quit()
 	}()
 
+	// Opening the menu means the user has seen the outage: stop the blinking.
+	go func() {
+		for range systray.TrayOpenedCh {
+			select {
+			case iconAck <- struct{}{}:
+			default: // an acknowledgement is already queued
+			}
+		}
+	}()
+
+	go iconLoop()
 	go pollLoop()
 	go offerLaunchAtLogin()
 }
@@ -449,6 +467,9 @@ func checkStatus(ctx context.Context) {
 	}
 	haveStatus = true
 	updateStatusUI(s)
+	// Outside updateStatusUI on purpose: that holds mu, and this send can block
+	// while a menu is open, which would stall the click handlers that need mu.
+	reportStatusToIcon(s)
 }
 
 func updateStatusUI(s status.Summary) {
@@ -460,7 +481,6 @@ func updateStatusUI(s status.Summary) {
 	}
 
 	if s.AllOperational() {
-		setDot(false)
 		mStatus.SetTitle("✓  All services operational")
 		mStatus.SetTooltip("status.claude.com reports all services operational")
 		for _, mi := range mStatusItems {
@@ -470,7 +490,6 @@ func updateStatusUI(s status.Summary) {
 		return
 	}
 
-	setDot(true)
 	desc := s.Description
 	if desc == "" {
 		desc = status.Human(s.Indicator) + " service disruption"
@@ -520,19 +539,91 @@ func incidentTooltip(inc status.Incident) string {
 	return truncate(tip, 300)
 }
 
-// setDot shows or hides the red dot in front of the menu-bar percentages. The
-// systray call reaches AppKit on the main thread, so it is only made when the
-// state actually changes.
-func setDot(on bool) {
-	if on == dotShown {
-		return
+// reportStatusToIcon tells iconLoop what the status page says: whether anything
+// is wrong, and whether any of it is new since the last poll. An outage with no
+// listed incidents still counts as ongoing — the indicator alone is enough.
+func reportStatusToIcon(s status.Summary) {
+	cur := make(map[string]bool, len(s.Incidents))
+	isNew := false
+	for _, inc := range s.Incidents {
+		cur[inc.ID] = true
+		if !lastIncidents[inc.ID] {
+			isNew = true
+		}
 	}
-	if on {
-		systray.SetIcon(icon.RedDotPNG())
-	} else {
-		systray.SetIcon(noIcon)
+	lastIncidents = cur
+	iconUpdates <- iconUpdate{ongoing: !s.AllOperational(), isNew: isNew}
+}
+
+// iconUpdate is what the latest status poll saw.
+type iconUpdate struct{ ongoing, isNew bool }
+
+type iconState int
+
+const (
+	stateOK    iconState = iota // all operational: no icon at all, text only
+	stateAlert                  // unacknowledged outage: blinking red dot
+	stateAck                    // seen by the user: steady red dot
+)
+
+// iconLoop owns the menu-bar icon. It is the only writer, so the blink can never
+// race a state change and leave the wrong icon on screen. The dot blinks until
+// the user opens the menu, then stays solid for as long as the outage lasts.
+func iconLoop() {
+	st := stateOK
+	red := false
+
+	setRed := func(on bool) {
+		red = on
+		if on {
+			systray.SetIcon(icon.RedDotPNG())
+		} else {
+			// Blink off, not outage over: a transparent image of the same size
+			// holds the icon slot so the percentages don't shift.
+			systray.SetIcon(icon.BlankPNG())
+		}
 	}
-	dotShown = on
+	apply := func(next iconState) {
+		st = next
+		switch next {
+		case stateOK:
+			// All clear: drop the icon entirely, so it's text only again.
+			red = false
+			systray.SetIcon(noIcon)
+		case stateAlert:
+			setRed(true) // start the blink lit, so it is seen immediately
+		case stateAck:
+			red = true
+			systray.SetIcon(icon.RedDotPNG())
+		}
+	}
+
+	t := time.NewTicker(blinkInterval)
+	defer t.Stop()
+
+	for {
+		select {
+		case u := <-iconUpdates:
+			switch {
+			case !u.ongoing:
+				if st != stateOK {
+					apply(stateOK)
+				}
+			case u.isNew || st == stateOK:
+				// A fresh incident re-arms the blink even if an earlier one has
+				// already been acknowledged.
+				apply(stateAlert)
+			}
+		case <-iconAck:
+			if st == stateAlert {
+				apply(stateAck)
+			}
+		case <-t.C:
+			if st == stateAlert {
+				setRed(!red)
+			}
+		}
+	}
 }
 
 func truncate(s string, n int) string {

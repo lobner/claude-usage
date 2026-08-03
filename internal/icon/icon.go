@@ -28,8 +28,10 @@ const (
 var colRed = color.NRGBA{R: 0xff, G: 0x3b, B: 0x30, A: 0xff} // macOS system red
 
 var (
-	redOnce sync.Once
-	redPNG  []byte
+	redOnce   sync.Once
+	redPNG    []byte
+	blankOnce sync.Once
+	blankPNG  []byte
 )
 
 // RedDotPNG returns the encoded red dot. The result is computed once and shared,
@@ -43,6 +45,23 @@ func RedDotPNG() []byte {
 		redPNG = buf.Bytes()
 	})
 	return redPNG
+}
+
+// BlankPNG returns a fully transparent image the same size as the dot. It is the
+// off phase of the blink: setting a same-sized invisible image keeps the icon slot
+// occupied, so the percentages stay put instead of jumping left and back twice a
+// second. Removing the icon outright is right only when the outage is over.
+//
+// The result is computed once and shared, so callers must not modify the returned
+// slice.
+func BlankPNG() []byte {
+	blankOnce.Do(func() {
+		img := image.NewNRGBA(image.Rect(0, 0, canvas, canvas))
+		var buf bytes.Buffer
+		_ = png.Encode(&buf, img)
+		blankPNG = buf.Bytes()
+	})
+	return blankPNG
 }
 
 // drawDisc paints an anti-aliased filled circle by 4×4 supersampling each pixel.
