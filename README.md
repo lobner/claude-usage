@@ -10,9 +10,17 @@ as [claude.ai/settings/usage](https://claude.ai/settings/usage):
 <img width="206" alt="The dropdown: both meters with their reset times, service status, and Launch at Login" src="docs/menu.png" />
 
 The dropdown shows each percentage, its reset time, the Claude service status,
-*Open usage page*, *Refresh now*, the last-checked time, *Launch at Login*, and
-*Quit*. When a meter first crosses a threshold (default 80%) you get a
+*Open usage page*, *Refresh now*, the last-checked time, *Launch at Login*,
+*About*, and *Quit*. When a meter first crosses a threshold (default 80%) you get a
 Notification Centre banner.
+
+The **About** row names the build — `About Claude Usage v2.0.0` — and opens that
+version's release notes when clicked. Its tooltip carries the commit, the build
+date and the architecture, which is what a bug report actually needs: the released
+archives are Apple silicon only, and these builds are unsigned, so "which build is
+that?" is otherwise unanswerable. `make-app.sh` stamps all three in from
+`git describe`, so an untagged build says `v1.2.0-3-g1a2b3c4` and a dirty tree says
+`-dirty`; `go run .` says `dev`.
 
 ## Service status
 
