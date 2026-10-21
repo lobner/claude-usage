@@ -290,27 +290,39 @@ fn load_credentials(deadline: Instant) -> Result<Credentials, Error> {
 /// started from Finder or at login gets a minimal PATH. The tool is stopped if
 /// it is still running at `deadline`.
 fn keychain_read(deadline: Instant) -> Option<Vec<u8>> {
-    let mut child = Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+    let mut cmd = Command::new("/usr/bin/security");
+    cmd.args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"]);
+    output_by(cmd, deadline)
+}
+
+/// Runs `cmd` and returns its stdout when it exits with success before
+/// `deadline`. It is stopped at the deadline. Stdout is read on a second thread
+/// while the process runs, as Go's `Output()` does: a process with more output
+/// than the pipe holds otherwise blocks on its write, and never exits.
+fn output_by(mut cmd: Command, deadline: Instant) -> Option<Vec<u8>> {
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+
     let status = match child.wait_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(Some(status)) => status,
         _ => {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = reader.join(); // the pipe closes when the process dies
             return None;
         }
     };
-    if !status.success() {
-        return None;
-    }
-    let mut out = Vec::new();
-    child.stdout.take()?.read_to_end(&mut out).ok()?;
-    Some(out)
+    let out = reader.join().ok()?.ok()?;
+    status.success().then_some(out)
 }
 
 fn parse_blob(data: &[u8]) -> Option<Credentials> {
@@ -449,6 +461,37 @@ mod tests {
         assert!(parse_blob(br#"{"claudeAiOauth":{"accessToken":""}}"#).is_none());
         assert!(parse_blob(br#"{"claudeAiOauth":null}"#).is_none());
         assert!(parse_blob(b"not json").is_none());
+    }
+
+    /// More output than a pipe holds (64 KiB) must not block the process until
+    /// the deadline.
+    #[test]
+    fn output_by_drains_large_output() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "head -c 300000 /dev/zero"]);
+        let start = Instant::now();
+        let out = output_by(cmd, start + Duration::from_secs(5)).expect("output");
+        assert_eq!(out.len(), 300_000);
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "it waited for the deadline"
+        );
+    }
+
+    #[test]
+    fn output_by_stops_at_the_deadline() {
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("10");
+        let start = Instant::now();
+        assert!(output_by(cmd, start + Duration::from_millis(300)).is_none());
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn output_by_rejects_failure() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "echo partial; exit 44"]);
+        assert!(output_by(cmd, Instant::now() + Duration::from_secs(5)).is_none());
     }
 
     #[test]
