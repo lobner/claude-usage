@@ -48,10 +48,12 @@ BUILT=$(date -u +%Y-%m-%d)
 echo "Building binary… ($VERSION)"
 # The stamps reach the binary through option_env! in src/main.rs. Cargo tracks
 # those variables, so a new stamp rebuilds the binary. Cargo is found in
-# ~/.cargo/bin when it is not on PATH.
+# ~/.cargo/bin when it is not on PATH. --target-dir overrides CARGO_TARGET_DIR
+# and build.target-dir, so the binary is always where the copy below reads it,
+# and never a stale one from an earlier build.
 CARGO=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
 CLAUDEUSAGE_VERSION=$VERSION CLAUDEUSAGE_COMMIT=$COMMIT CLAUDEUSAGE_BUILD_DATE=$BUILT \
-	"$CARGO" build --release --locked
+	"$CARGO" build --release --locked --target-dir target
 cp "target/release/$EXE" "$MACOS/$EXE"
 
 cp build/Info.plist "$CONTENTS/Info.plist"
